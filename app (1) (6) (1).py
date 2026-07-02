@@ -1,0 +1,480 @@
+# App.py
+import streamlit as st
+import requests
+import io
+import json
+import pandas as pd
+from docx import Document
+
+# Set Page Config for mobile
+st.set_page_config(page_title="Financial Timeline Engine", layout="centered")
+
+# ---------------------------------------------------------------------------
+# Universal Model Configuration
+# ---------------------------------------------------------------------------
+# NOTE: OpenRouter requires model IDs in "provider/model-name" format.
+# The previous values ("google", "groq", "openrouter") were not valid
+# OpenRouter model IDs and would cause every API call to fail with a 400.
+PRIMARY_MODEL = "google/gemini-2.0-flash-exp:free"
+FALLBACK_MODEL = "meta-llama/llama-3.1-8b-instruct:free"
+
+# Reserved for a future multi-provider fallback chain (Google -> Groq ->
+# OpenRouter). Currently only OpenRouter is wired into the main pipeline;
+# call_google_ai_studio() and call_groq_engine() exist as standalone,
+# working utility functions that can be plugged in later.
+SECONDARY_MODEL = "groq"
+TERTIARY_MODEL = "openrouter"
+
+
+# Initialize session states
+if "ai_connected" not in st.session_state:
+    st.session_state["ai_connected"] = False
+
+if "ai_provider_used" not in st.session_state:
+    st.session_state["ai_provider_used"] = None
+
+if "timeline_data" not in st.session_state:
+    st.session_state["timeline_data"] = []
+
+
+# ---------------------------------------------------------------------------
+# File extraction layer
+# ---------------------------------------------------------------------------
+@st.cache_data(show_spinner=False)
+def extract_document_data(uploaded_file):
+    """Reads text lines from uploaded files safely."""
+    if uploaded_file is None:
+        return ""
+    try:
+        filename = uploaded_file.name.lower()
+        if filename.endswith(".txt") or filename.endswith(".csv"):
+            return uploaded_file.read().decode("utf-8", errors="ignore")
+        elif filename.endswith(".xlsx"):
+            # EXCEL PARSER
+            df_sheets = pd.read_excel(uploaded_file, sheet_name=None)
+            excel_text = ""
+            for sheet, df in df_sheets.items():
+                excel_text += f"\n--- Excel Sheet: {sheet} ---\n" + df.to_string() + "\n"
+            return excel_text
+        elif filename.endswith(".docx"):
+            # WORD PARSER
+            word_doc = Document(uploaded_file)
+            word_text = f"\n--- Word Document: {filename} ---\n"
+            for para in word_doc.paragraphs:
+                if para.text.strip():
+                    word_text += para.text + "\n"
+            return word_text
+        else:
+            # Fallback simple reader for byte streams
+            return uploaded_file.read().decode("utf-8", errors="ignore")
+    except Exception as e:
+        return f"Error reading file text content: {str(e)}"
+
+
+# ---------------------------------------------------------------------------
+# Secure AI thesis engine
+# ---------------------------------------------------------------------------
+import google.generativeai as genai
+
+
+def call_google_ai_studio(prompt_text, system_prompt=None, temperature=None):
+    """Calls Google AI Studio (Gemini) directly. This is now the PRIMARY
+    provider in the fallback chain (see call_ai_with_fallback)."""
+    try:
+        api_key = st.secrets.get("GOOGLE_API_KEY", "")
+        if not api_key:
+            raise ValueError("Missing Google Key")
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel(
+            "gemini-2.5-flash",
+            system_instruction=system_prompt if system_prompt else None
+        )
+        generation_config = {"temperature": temperature} if temperature is not None else None
+        res = model.generate_content(str(prompt_text), generation_config=generation_config)
+        if res.text:
+            return res.text
+        raise RuntimeError("Empty response")
+    except Exception:
+        raise
+
+
+def call_groq_engine(prompt_text, system_prompt=None, temperature=None):
+    """Calls the Groq API directly. This is now the SECONDARY provider in
+    the fallback chain (see call_ai_with_fallback), used only if Google AI
+    Studio fails.
+
+    Bug fixes (carried over from prior pass):
+      - endpoint was "https://groq.com" (not a real API route); corrected
+        to the actual Groq chat completions endpoint.
+      - response parsing was missing the list index on "choices".
+    """
+    try:
+        api_key = st.secrets.get("GROQ_API_KEY", "")
+        if not api_key:
+            raise ValueError("Missing Groq Key")
+        endpoint = "https://api.groq.com/openai/v1/chat/completions"
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": str(prompt_text)})
+        payload = {"model": "llama3-8b-8192", "messages": messages}
+        if temperature is not None:
+            payload["temperature"] = temperature
+        res = requests.post(endpoint, headers=headers, json=payload, timeout=30)
+        if res.status_code == 200:
+            return res.json()["choices"][0]["message"]["content"]
+        raise RuntimeError(f"Failed with status: {res.status_code}")
+    except Exception:
+        raise
+
+
+def _openrouter_request(prompt_text, model_id, system_prompt=None, temperature=None):
+    """Shared helper for a single OpenRouter chat-completion call.
+    Returns (success: bool, content_or_error: str).
+    """
+    api_key = st.secrets.get("OPENROUTER_API_KEY", "")
+    if not api_key:
+        return False, "❌ OpenRouter API Key missing inside Streamlit Secrets panel."
+
+    endpoint = "https://openrouter.ai/api/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://streamlit.app",
+        "X-Title": "Financial Timeline Engine"
+    }
+
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": str(prompt_text)})
+
+    payload = {"model": model_id, "messages": messages}
+    if temperature is not None:
+        payload["temperature"] = temperature
+
+    try:
+        res = requests.post(endpoint, headers=headers, json=payload, timeout=45)
+    except requests.exceptions.Timeout:
+        return False, "TIMEOUT"
+    except Exception:
+        return False, "🔴 AI server busy or experiencing high latency volume right now. Please tap regenerate to claim a fresh server slot link."
+
+    if res.status_code == 200:
+        try:
+            data = res.json()
+            if "choices" in data and len(data["choices"]) > 0:
+                st.session_state["ai_connected"] = True
+                return True, data["choices"][0]["message"]["content"]
+            return False, "⚠️ OpenRouter returned an empty choices payload. Please try clicking the button again."
+        except Exception:
+            return False, "⚠️ OpenRouter server returned a malformed response. The free pool is heavily congested right now. Please try again in 10 seconds!"
+    else:
+        return False, f"❌ OpenRouter Connection Failed. Server status code: {res.status_code}. Please retry."
+
+
+def call_openrouter_engine(prompt_text, system_prompt=None, temperature=None):
+    """Sends financial data requests to OpenRouter, with a retry against a
+    fallback OpenRouter model if the primary OpenRouter model fails or
+    times out. This is now the FINAL fallback in the three-provider chain
+    (see call_ai_with_fallback) -- reached only if both Google AI Studio
+    and Groq have already failed.
+
+    Bug fixes (carried over from prior pass):
+      - PRIMARY_MODEL was not a valid OpenRouter model ID ("google").
+      - FALLBACK_MODEL was referenced but never defined (NameError).
+      - Previously only a hard Timeout triggered the fallback; now any
+        failure (timeout OR non-200 OR malformed response) retries once
+        against FALLBACK_MODEL, so the retry logic is actually reachable.
+    """
+    if system_prompt is None:
+        system_prompt = (
+            "You are an elite Wall Street financial research analyst. Generate "
+            "structured multi-section corporate reports with key dates, events, "
+            "and milestones."
+        )
+
+    # Pass 1: Primary OpenRouter model
+    success, result = _openrouter_request(prompt_text, PRIMARY_MODEL, system_prompt=system_prompt, temperature=temperature)
+    if success:
+        return result
+
+    # Pass 2: Fallback OpenRouter model (retry on timeout OR any other failure)
+    success, result = _openrouter_request(prompt_text, FALLBACK_MODEL, system_prompt=system_prompt, temperature=temperature)
+    if success:
+        return result
+
+    if result == "TIMEOUT":
+        return "🔴 AI server busy or experiencing high latency volume right now. Please tap regenerate to claim a fresh server slot link."
+    return result
+
+
+def call_ai_with_fallback(prompt_text, system_prompt=None, temperature=None):
+    """NEW: real multi-provider fallback chain.
+
+    Order: Google AI Studio (primary) -> Groq (secondary) -> OpenRouter
+    (final fallback, which internally also retries across two OpenRouter
+    models as before). Returns the first successful provider's output.
+    Sets st.session_state["ai_connected"] and ["ai_provider_used"] so the
+    UI status indicator reflects whichever provider actually answered.
+    """
+    # 1) PRIMARY: Google AI Studio
+    try:
+        result = call_google_ai_studio(prompt_text, system_prompt=system_prompt, temperature=temperature)
+        st.session_state["ai_connected"] = True
+        st.session_state["ai_provider_used"] = "Google AI Studio"
+        return result
+    except Exception:
+        pass
+
+    # 2) SECONDARY: Groq
+    try:
+        result = call_groq_engine(prompt_text, system_prompt=system_prompt, temperature=temperature)
+        st.session_state["ai_connected"] = True
+        st.session_state["ai_provider_used"] = "Groq"
+        return result
+    except Exception:
+        pass
+
+    # 3) FINAL FALLBACK: OpenRouter (already has its own internal 2-model retry)
+    result = call_openrouter_engine(prompt_text, system_prompt=system_prompt, temperature=temperature)
+    if not (result.startswith("❌") or result.startswith("🔴") or result.startswith("⚠️")):
+        st.session_state["ai_connected"] = True
+        st.session_state["ai_provider_used"] = "OpenRouter"
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Timeline extraction & parsing engine
+# ---------------------------------------------------------------------------
+def extract_timeline_events(ai_narrative):
+    """Parses AI narrative to extract structured timeline events."""
+    try:
+        structuring_prompt = f"""Extract timeline events from this narrative and return as JSON array with objects containing: date (YYYY-MM-DD or YYYY-MM or YYYY), event (string), category (string), impact (string).
+
+Narrative:
+{ai_narrative}
+
+Return ONLY valid JSON array, no markdown, no extra text."""
+
+        result = call_ai_with_fallback(structuring_prompt, temperature=0.3)
+        if result.startswith("❌") or result.startswith("🔴") or result.startswith("⚠️"):
+            return []
+
+        # Strip markdown code fences if the model wrapped the JSON anyway
+        # (this was previously missing, causing json.loads to silently
+        # fail on fenced responses and always return an empty list).
+        cleaned = result.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.strip("`")
+            if cleaned.lower().startswith("json"):
+                cleaned = cleaned[4:]
+            cleaned = cleaned.strip()
+
+        try:
+            events = json.loads(cleaned)
+            return events if isinstance(events, list) else []
+        except Exception:
+            return []
+    except Exception:
+        return []
+
+
+# ---------------------------------------------------------------------------
+# Micro-utility document exporter (.DOCX exporter)
+# ---------------------------------------------------------------------------
+def generate_docx_download(text_content, timeline_data=None):
+    """Compiles the generated AI analysis report into a clean Word document download stream."""
+    doc = Document()
+
+    doc.add_heading("Institutional Investment Research Memo", level=1)
+    doc.add_paragraph("-" * 40)
+    doc.add_heading("Executive Summary & Analysis", level=2)
+
+    # Secure row cleaning loop to bypass oxml crashes.
+    #
+    # BUG FIX: the original code had a `for...else` here. A for-loop's
+    # `else` clause runs whenever the loop finishes WITHOUT hitting a
+    # `break` -- which was every single time, since there's no `break`
+    # in the loop. That meant "No report content generated." was being
+    # appended after every successful report, not just empty ones.
+    # Replaced with a proper if/else on the outer content check.
+    if text_content:
+        clean_text_string = str(text_content)
+        for line in clean_text_string.split('\n'):
+            if line.strip():
+                # Strip out invalid control characters safely
+                sanitized_line = "".join(c for c in line if c.isprintable() or c in ['\t', '\n'])
+                # Remove markdown formatting symbols
+                sanitized_line = sanitized_line.replace('**', '').replace('__', '').replace('```', '')
+                if sanitized_line.strip():
+                    doc.add_paragraph(sanitized_line.strip())
+    else:
+        doc.add_paragraph("No report content generated.")
+
+    # Add timeline section if data exists
+    if timeline_data and len(timeline_data) > 0:
+        doc.add_heading("Extracted Timeline Events", level=2)
+        for event in timeline_data:
+            date_str = event.get("date", "N/A")
+            event_name = event.get("event", "N/A")
+            category = event.get("category", "N/A")
+            impact = event.get("impact", "N/A")
+
+            # Sanitize timeline event strings
+            date_str = "".join(c for c in str(date_str) if c.isprintable())
+            event_name = "".join(c for c in str(event_name) if c.isprintable())
+            category = "".join(c for c in str(category) if c.isprintable())
+            impact = "".join(c for c in str(impact) if c.isprintable())
+
+            doc.add_paragraph(f"📅 {date_str}: {event_name}", style="List Bullet")
+            doc.add_paragraph(f"Category: {category} | Impact: {impact}", style="List Bullet 2")
+
+    bio = io.BytesIO()
+    doc.save(bio)
+    bio.seek(0)
+    return bio
+
+
+# ---------------------------------------------------------------------------
+# Timeline visualization engine
+# ---------------------------------------------------------------------------
+def render_timeline_visualization(timeline_data):
+    """Renders a simplified timeline visualization for mobile."""
+    if not timeline_data or len(timeline_data) == 0:
+        st.info("No timeline events extracted yet.")
+        return
+
+    st.subheader("📊 Timeline Events")
+
+    # Create a dataframe for display
+    df_timeline = pd.DataFrame(timeline_data)
+
+    # Display as table
+    st.dataframe(df_timeline, use_container_width=True, hide_index=True)
+
+
+# ---------------------------------------------------------------------------
+# Main workspace control layer
+# ---------------------------------------------------------------------------
+def main():
+    st.title("📈 Financial Timeline Engine")
+
+    # Dynamic status tracker logic
+    # NOTE: previously this only checked OPENROUTER_API_KEY. Since the app
+    # now tries Google AI Studio -> Groq -> OpenRouter in order, the status
+    # check now looks for at least one of the three provider keys.
+    has_any_key = bool(
+        st.secrets.get("GOOGLE_API_KEY", "")
+        or st.secrets.get("GROQ_API_KEY", "")
+        or st.secrets.get("OPENROUTER_API_KEY", "")
+    )
+    if not has_any_key:
+        st.error("🔴 AI Status: Offline (No AI Provider Keys Found in Streamlit Secrets)")
+    elif st.session_state["ai_connected"]:
+        provider = st.session_state.get("ai_provider_used", "AI Provider")
+        st.success(f"🟢 AI Status: Connected & Verified Live ({provider})")
+    else:
+        st.info("🟡 AI Status: API Key(s) Loaded (Awaiting First Live Document Generation Connection)")
+
+    # Sidebar Document Ingestion
+    st.sidebar.header("📁 Document Ingestion")
+    uploaded_files = st.sidebar.file_uploader(
+        "Upload Financial Documents (.txt, .csv, .xlsx, .docx)",
+        type=["txt", "csv", "xlsx", "docx"],
+        accept_multiple_files=True
+    )
+
+    combined_raw_text = ""
+    if uploaded_files:
+        for f in uploaded_files:
+            combined_raw_text += f"\n--- Start of File: {f.name} ---\n"
+            combined_raw_text += extract_document_data(f)
+
+    # Clean executive metric data grid view summary
+    st.subheader("📊 Ingested Data Summary")
+    col1, col2 = st.columns(2)
+    col1.metric(label="📄 Files Processed", value=len(uploaded_files) if uploaded_files else 0)
+    col2.metric(label="📊 Extracted Characters", value=len(combined_raw_text))
+
+    # Trigger Action Analysis Button Link
+    st.markdown("---")
+    st.subheader("🔬 AI Analysis Engine")
+
+    if st.button("🚀 Generate Timeline Report"):
+        # BUG FIX: previously there was no guard here -- clicking the
+        # button with zero uploaded files would still call the AI with
+        # an empty document string. Now we check up front.
+        if not uploaded_files:
+            st.warning("Please upload at least one financial document before generating a report.")
+        else:
+            with st.spinner("Processing document data and generating timeline..."):
+                prompt = f"""Analyze the following corporate document data text carefully. Extract key event milestones, timelines, and potential controversy flags. Write a comprehensive multi-paragraph investment memo that identifies:
+1. Key financial events and dates
+2. Market movements and impacts
+3. Risk factors and opportunities
+4. Strategic implications
+
+Document Data:
+{combined_raw_text}
+
+Generate a professional investment memo."""
+
+                ai_narrative_result = call_ai_with_fallback(prompt)
+
+                # Show AI Result
+                st.markdown("### 📝 Generated Investment Memo")
+                st.write(ai_narrative_result)
+
+                is_error = ("❌" in ai_narrative_result) or ("🔴" in ai_narrative_result) or ("⚠️" in ai_narrative_result)
+
+                timeline_events = []
+                if not is_error:
+                    # Extract timeline events
+                    with st.spinner("Extracting timeline events..."):
+                        timeline_events = extract_timeline_events(ai_narrative_result)
+                        st.session_state["timeline_data"] = timeline_events
+
+                    # Render timeline visualization
+                    if timeline_events:
+                        render_timeline_visualization(timeline_events)
+
+                    # Render Working Document Exporter Module Download Button Link
+                    docx_file_stream = generate_docx_download(ai_narrative_result, timeline_events)
+                    st.download_button(
+                        label="📥 Download as Word Document",
+                        data=docx_file_stream,
+                        file_name="Financial_Timeline_Investment_Memo.docx",
+                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                    )
+                else:
+                    # BUG FIX: this branch previously showed a misleading
+                    # "please upload documents" message even when files
+                    # WERE uploaded -- the real problem was an AI-call
+                    # failure. Message corrected to reflect that.
+                    st.warning("AI generation encountered an error. Please review the message above and try again.")
+
+
+def check_login():
+    if "authenticated" not in st.session_state:
+        st.session_state["authenticated"] = False
+    if not st.session_state["authenticated"]:
+        st.markdown("🔐 Institutional Terminal Access")
+        col_l1, col_l2, col_l3 = st.columns([1, 2, 1])
+        with col_l2:
+            input_user = st.text_input("Username")
+            input_pass = st.text_input("Password", type="password")
+            if st.button("🚀 Log In", use_container_width=True):
+                if input_user == "admin" and input_pass == "financial_terminal_2026":
+                    st.session_state["authenticated"] = True
+                    st.rerun()
+                else:
+                    st.error("❌ Invalid Credentials")
+        return False
+    return True
+
+
+if __name__ == "__main__":
+    if check_login():
+        main()
