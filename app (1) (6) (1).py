@@ -391,8 +391,8 @@ def main():
     # Sidebar Document Ingestion
     st.sidebar.header("📁 Document Ingestion")
     uploaded_files = st.sidebar.file_uploader(
-        "Upload Financial Documents (.txt, .csv, .xlsx, .docx)",
-        type=["txt", "csv", "xlsx", "docx"],
+        "Upload Financial Documents (.txt, .csv, .xlsx, .docx, .pdf)",
+        type=["txt", "csv", "xlsx", "docx","pdf"],
         accept_multiple_files=True
     )
 
