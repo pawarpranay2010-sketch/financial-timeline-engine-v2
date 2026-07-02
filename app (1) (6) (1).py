@@ -57,16 +57,15 @@ def extract_document_data(uploaded_file):
             for sheet, df in df_sheets.items():
                 excel_text += f"\n--- Excel Sheet: {sheet} ---\n" + df.to_string() + "\n"
             return excel_text
-            
         elif filename.endswith(".pdf"):
-           pdf_reader = PdfReader(uploaded_file)
-           pdf_text = f"\n--- PDF Document: {filename} ---\n"
-           for page_num, page in enumerate(pdf_reader.pages, start=1):
-           page_text = page.extract_text()
-           if page_text and page_text.strip():
-                   pdf_text += f"\n[Page {page_num}]\n" + page_text.strip() + "\n"
-           return pdf_text
-        
+            # PDF PARSER
+            pdf_reader = PdfReader(uploaded_file)
+            pdf_text = f"\n--- PDF Document: {filename} ---\n"
+            for page_num, page in enumerate(pdf_reader.pages, start=1):
+                page_text = page.extract_text()
+                if page_text and page_text.strip():
+                    pdf_text += f"\n[Page {page_num}]\n" + page_text.strip() + "\n"
+            return pdf_text
         elif filename.endswith(".docx"):
             # WORD PARSER
             word_doc = Document(uploaded_file)
