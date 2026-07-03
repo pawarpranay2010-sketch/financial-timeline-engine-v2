@@ -134,7 +134,9 @@ def call_groq_engine(prompt_text, system_prompt=None, temperature=None):
         res = requests.post(endpoint, headers=headers, json=payload, timeout=30)
         if res.status_code == 200:
             return res.json()["choices"][0]["message"]["content"]
-        raise RuntimeError(f"Failed with status: {res.status_code}")
+        raise RuntimeError(
+    f"Failed with status: {res.status_code}\nResponse: {res.text}"
+        )
     except Exception:
         raise
 
