@@ -567,14 +567,15 @@ def main():
             st.warning("Please upload at least one financial document before generating a report.")
         else:
             with st.spinner("Processing document data and generating timeline..."):
+                master_summary = merge_document_summaries(document_summaries)
                 prompt = f"""Analyze the following corporate document data text carefully. Extract key event milestones, timelines, and potential controversy flags. Write a comprehensive multi-paragraph investment memo that identifies:
 1. Key financial events and dates
 2. Market movements and impacts
 3. Risk factors and opportunities
 4. Strategic implications
 
-Document Data:
-{combined_raw_text}
+Document Summary:
+{master_summary}
 
 Generate a professional investment memo."""
 
