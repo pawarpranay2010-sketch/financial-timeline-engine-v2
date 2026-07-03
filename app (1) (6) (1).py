@@ -142,7 +142,10 @@ def call_groq_engine(prompt_text, system_prompt=None, temperature=None):
             res = requests.post(endpoint, headers=headers, json=payload, timeout=30)
             if res.status_code == 200:
                 return res.json()["choices"][0]["message"]["content"]
-            last_error = RuntimeError(f"Groq model '{model_id}' failed with status: {res.status_code}")
+            elif res.status_code == 429:
+                last_error = RuntimeError(f"Groq model '{model_id}' rate-limited (HTTP 429); trying next model.")
+            else:
+                last_error = RuntimeError(f"Groq model '{model_id}' failed with status: {res.status_code}")
         except Exception as e:
             last_error = e
 
