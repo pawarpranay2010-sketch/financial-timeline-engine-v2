@@ -429,7 +429,7 @@ def main():
         accept_multiple_files=True
     )
     
-combined_raw_text = ""
+    combined_raw_text = ""
     document_summaries = []
     if uploaded_files:
         for f in uploaded_files:
