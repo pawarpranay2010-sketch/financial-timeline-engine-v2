@@ -287,7 +287,48 @@ Return only the summary text, with no preamble or meta-commentary."""
 
     result = call_ai_with_fallback(summarization_prompt, system_prompt=system_prompt, temperature=0.3)
     return result
+    
+def merge_document_summaries(document_summaries):
+    """Merges per-document summaries (from summarize_single_document) into
+    one coherent institutional financial master summary. Preserves key
+    financial metrics, timelines, risks, controversies, and strategic
+    insights across all source documents."""
+    if not document_summaries or len(document_summaries) == 0:
+        return "⚠️ No document summaries available to merge."
 
+    system_prompt = (
+        "You are an elite institutional financial analyst. Merge multiple "
+        "per-document summaries into a single, coherent master summary "
+        "suitable for a buy-side investment research desk. Reconcile "
+        "overlapping information rather than repeating it, but preserve "
+        "every distinct financial metric, date, event, risk, controversy, "
+        "and strategic insight found across the source summaries. Do not "
+        "drop material information for the sake of brevity."
+    )
+
+    combined_summaries_text = ""
+    for doc in document_summaries:
+        file_name = doc.get("file_name", "Unknown Document")
+        summary = doc.get("summary", "")
+        combined_summaries_text += f"\n--- Summary of: {file_name} ---\n{summary}\n"
+
+    merge_prompt = f"""Below are individual summaries of separate financial documents. Merge them into one coherent institutional financial master summary.
+
+Requirements:
+- Reconcile and consolidate overlapping information; do not repeat the same fact twice.
+- Preserve all distinct financial metrics, dates/timelines, risk factors, controversies, and strategic implications mentioned across the summaries.
+- Organize the merged summary in clear prose paragraphs (no markdown headers or bullet lists).
+- Attribute conflicting figures or claims across documents where relevant, rather than silently picking one.
+- Do not fabricate information not present in the source summaries.
+
+Individual Document Summaries:
+{combined_summaries_text}
+
+Return only the merged master summary text, with no preamble or meta-commentary."""
+
+    result = call_ai_with_fallback(merge_prompt, system_prompt=system_prompt, temperature=0.3)
+    return result
+    
 # ---------------------------------------------------------------------------
 # Timeline extraction & parsing engine
 # ---------------------------------------------------------------------------
