@@ -273,6 +273,27 @@ def call_ai_with_fallback(prompt_text, system_prompt=None, temperature=None):
     #     except Exception:
     #         pass
 
+# Phase 2.2: chunking config for large documents, to avoid oversized AI
+# requests (e.g. Groq HTTP 413 payload-too-large). Tune here if needed.
+CHUNK_SIZE = 10000
+CHUNK_OVERLAP = 500
+
+
+def chunk_text(text, chunk_size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
+    """Splits text into fixed-size character chunks with optional overlap."""
+    if not text:
+        return []
+    chunks = []
+    start = 0
+    text_length = len(text)
+    while start < text_length:
+        end = start + chunk_size
+        chunks.append(text[start:end])
+        if end >= text_length:
+            break
+        start = end - overlap
+    return chunks
+    
 def summarize_single_document(document_text, file_name):
     """Summarizes one uploaded document into a concise institutional
     financial summary (500-1000 words). Uses the existing three-provider
@@ -347,6 +368,27 @@ Return only the merged master summary text, with no preamble or meta-commentary.
 
     result = call_ai_with_fallback(merge_prompt, system_prompt=system_prompt, temperature=0.3)
     return result
+    
+def summarize_document_with_chunking(document_text, file_name):
+    """Phase 2.2: for large documents, splits text into chunks (via
+    chunk_text) before summarizing, to avoid oversized AI requests (e.g.
+    Groq HTTP 413 payload-too-large). Each chunk is summarized with the
+    existing summarize_single_document(), then the chunk summaries are
+    merged into one document-level summary using the existing
+    merge_document_summaries() -- no new merge logic needed. Small
+    documents (<= CHUNK_SIZE) skip chunking entirely and behave exactly
+    as before."""
+    if not document_text or len(document_text) <= CHUNK_SIZE:
+        return summarize_single_document(document_text, file_name)
+
+    chunks = chunk_text(document_text)
+    chunk_summaries = []
+    for idx, chunk in enumerate(chunks, start=1):
+        chunk_label = f"{file_name} (Part {idx}/{len(chunks)})"
+        chunk_summary = summarize_single_document(chunk, chunk_label)
+        chunk_summaries.append({"file_name": chunk_label, "summary": chunk_summary})
+
+    return merge_document_summaries(chunk_summaries)
     
 # ---------------------------------------------------------------------------
 # Timeline extraction & parsing engine
@@ -498,7 +540,7 @@ def main():
             combined_raw_text += f"\n--- Start of File: {f.name} ---\n"
             combined_raw_text += extracted_text
 
-            summary_text = summarize_single_document(extracted_text, f.name)
+            summary_text = summarize_document_with_chunking(extracted_text, f.name)
             document_summaries.append({
                 "file_name": f.name,
                 "summary": summary_text
