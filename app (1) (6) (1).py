@@ -428,12 +428,21 @@ def main():
         type=["txt", "csv", "xlsx", "docx","pdf"],
         accept_multiple_files=True
     )
-
-    combined_raw_text = ""
+    
+combined_raw_text = ""
+    document_summaries = []
     if uploaded_files:
         for f in uploaded_files:
+            extracted_text = extract_document_data(f)
+
             combined_raw_text += f"\n--- Start of File: {f.name} ---\n"
-            combined_raw_text += extract_document_data(f)
+            combined_raw_text += extracted_text
+
+            summary_text = summarize_single_document(extracted_text, f.name)
+            document_summaries.append({
+                "file_name": f.name,
+                "summary": summary_text
+            })
 
     # Clean executive metric data grid view summary
     st.subheader("📊 Ingested Data Summary")
