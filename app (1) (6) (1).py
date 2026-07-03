@@ -259,6 +259,40 @@ def call_ai_with_fallback(prompt_text, system_prompt=None, temperature=None):
     # Replace both `except Exception as e:` blocks back to:
     #     except Exception:
     #         pass
+
+def summarize_single_document(document_text, file_name):
+    """Summarizes one uploaded document into a concise institutional
+    financial summary (500-1000 words). Uses the existing three-provider
+    fallback chain (Google AI Studio -> Groq -> OpenRouter)."""
+    if not document_text or not document_text.strip():
+        return f"⚠️ No extractable text found in '{file_name}'. Nothing to summarize."
+
+    system_prompt = (
+        "You are an elite institutional financial analyst. Produce concise, "
+        "precise, and professional document summaries suitable for a "
+        "buy-side investment research desk. Focus on material facts: key "
+        "figures, dates, events, risks, and strategic implications. Avoid "
+        "filler language and avoid restating the obvious."
+    )
+
+    summarization_prompt = f"""Summarize the following document into a single, coherent institutional financial summary.
+
+Requirements:
+- Length: 500 to 1000 words.
+- Tone: professional, analytical, institutional-grade (as if written for a portfolio manager).
+- Cover: key facts, financial figures, dates/events, risks, and any strategic or market implications present in the source text.
+- Do not include any content that is not supported by the source document.
+- Do not use markdown headers or bullet lists; write in clear prose paragraphs.
+
+Source Document Name: {file_name}
+
+Source Document Text:
+{document_text}
+
+Return only the summary text, with no preamble or meta-commentary."""
+
+    result = call_ai_with_fallback(summarization_prompt, system_prompt=system_prompt, temperature=0.3)
+    return result
     
 def merge_document_summaries(document_summaries):
     """Merges per-document summaries (from summarize_single_document) into
