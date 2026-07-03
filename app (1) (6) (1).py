@@ -89,23 +89,30 @@ def extract_document_data(uploaded_file):
 # ---------------------------------------------------------------------------
 # Secure AI thesis engine
 # ---------------------------------------------------------------------------
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 
 
 def call_google_ai_studio(prompt_text, system_prompt=None, temperature=None):
-    """Calls Google AI Studio (Gemini) directly. This is now the PRIMARY
-    provider in the fallback chain (see call_ai_with_fallback)."""
+    """Calls Google AI Studio (Gemini) via the official google-genai SDK.
+    This is the PRIMARY provider in the fallback chain (see
+    call_ai_with_fallback). Migrated from the deprecated
+    google.generativeai SDK (genai.configure / GenerativeModel) to the
+    official google-genai SDK (genai.Client / client.models.generate_content)."""
     try:
         api_key = st.secrets.get("GOOGLE_API_KEY", "")
         if not api_key:
             raise ValueError("Missing Google Key")
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel(
-            "gemini-2.5-flash",
-            system_instruction=system_prompt if system_prompt else None
+        client = genai.Client(api_key=api_key)
+        config = types.GenerateContentConfig(
+            system_instruction=system_prompt if system_prompt else None,
+            temperature=temperature if temperature is not None else None,
         )
-        generation_config = {"temperature": temperature} if temperature is not None else None
-        res = model.generate_content(str(prompt_text), generation_config=generation_config)
+        res = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=str(prompt_text),
+            config=config,
+        )
         if res.text:
             return res.text
         raise RuntimeError("Empty response")
