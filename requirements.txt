@@ -3,6 +3,6 @@ requests
 pandas
 python-docx
 openpyxl
-google-generativeai
+google-genai
 groq
 pypdf
