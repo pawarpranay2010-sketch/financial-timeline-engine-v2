@@ -25,6 +25,11 @@ FALLBACK_MODEL = "meta-llama/llama-3.1-8b-instruct:free"
 # working utility functions that can be plugged in later.
 SECONDARY_MODEL = "groq"
 TERTIARY_MODEL = "openrouter"
+GROQ_MODELS = [
+    "openai/gpt-oss-20b",
+    "openai/gpt-oss-120b",
+    "llama-3.1-8b-instant",
+]
 
 
 # Initialize session states
@@ -107,38 +112,44 @@ def call_google_ai_studio(prompt_text, system_prompt=None, temperature=None):
     except Exception:
         raise
 
-
 def call_groq_engine(prompt_text, system_prompt=None, temperature=None):
     """Calls the Groq API directly. This is now the SECONDARY provider in
     the fallback chain (see call_ai_with_fallback), used only if Google AI
     Studio fails.
 
-    Bug fixes (carried over from prior pass):
-      - endpoint was "https://groq.com" (not a real API route); corrected
-        to the actual Groq chat completions endpoint.
-      - response parsing was missing the list index on "choices".
+    Tries each model in GROQ_MODELS in order; if one is decommissioned or
+    errors out, automatically retries with the next model in the list.
+    Only raises (giving up on Groq entirely, so the chain proceeds to
+    OpenRouter) once every model in GROQ_MODELS has failed.
     """
-    try:
-        api_key = st.secrets.get("GROQ_API_KEY", "")
-        if not api_key:
-            raise ValueError("Missing Groq Key")
-        endpoint = "https://api.groq.com/openai/v1/chat/completions"
-        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-        messages = []
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": str(prompt_text)})
-        payload = {"model": "llama3-8b-8192", "messages": messages}
-        if temperature is not None:
-            payload["temperature"] = temperature
-        res = requests.post(endpoint, headers=headers, json=payload, timeout=30)
-        if res.status_code == 200:
-            return res.json()["choices"][0]["message"]["content"]
-        raise RuntimeError(
-    f"Failed with status: {res.status_code}\nResponse: {res.text}"
-        )
-    except Exception:
-        raise
+    api_key = st.secrets.get("GROQ_API_KEY", "")
+    if not api_key:
+        raise ValueError("Missing Groq Key")
+
+    endpoint = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": str(prompt_text)})
+
+    last_error = None
+    for model_id in GROQ_MODELS:
+        try:
+            payload = {"model": model_id, "messages": messages}
+            if temperature is not None:
+                payload["temperature"] = temperature
+            res = requests.post(endpoint, headers=headers, json=payload, timeout=30)
+            if res.status_code == 200:
+                return res.json()["choices"][0]["message"]["content"]
+            last_error = RuntimeError(f"Groq model '{model_id}' failed with status: {res.status_code}")
+        except Exception as e:
+            last_error = e
+
+    raise last_error
+
+
+
 
 
 def _openrouter_request(prompt_text, model_id, system_prompt=None, temperature=None):
