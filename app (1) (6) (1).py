@@ -221,13 +221,12 @@ def call_openrouter_engine(prompt_text, system_prompt=None, temperature=None):
 
 
 def call_ai_with_fallback(prompt_text, system_prompt=None, temperature=None):
-    """NEW: real multi-provider fallback chain.
+    """Real multi-provider fallback chain: Google AI Studio -> Groq -> OpenRouter.
 
-    Order: Google AI Studio (primary) -> Groq (secondary) -> OpenRouter
-    (final fallback, which internally also retries across two OpenRouter
-    models as before). Returns the first successful provider's output.
-    Sets st.session_state["ai_connected"] and ["ai_provider_used"] so the
-    UI status indicator reflects whichever provider actually answered.
+    TEMPORARY DEBUG MODE: exceptions from Google AI Studio and Groq are now
+    printed/displayed instead of silently passed, so you can see exactly
+    why a provider failed before it falls through to the next one.
+    Revert this once debugging is done -- see note at bottom of function.
     """
     # 1) PRIMARY: Google AI Studio
     try:
@@ -235,8 +234,9 @@ def call_ai_with_fallback(prompt_text, system_prompt=None, temperature=None):
         st.session_state["ai_connected"] = True
         st.session_state["ai_provider_used"] = "Google AI Studio"
         return result
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[DEBUG] Google AI Studio failed: {type(e).__name__}: {e}")
+        st.warning(f"🔧 DEBUG — Google AI Studio failed: {type(e).__name__}: {e}")
 
     # 2) SECONDARY: Groq
     try:
@@ -244,8 +244,9 @@ def call_ai_with_fallback(prompt_text, system_prompt=None, temperature=None):
         st.session_state["ai_connected"] = True
         st.session_state["ai_provider_used"] = "Groq"
         return result
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[DEBUG] Groq failed: {type(e).__name__}: {e}")
+        st.warning(f"🔧 DEBUG — Groq failed: {type(e).__name__}: {e}")
 
     # 3) FINAL FALLBACK: OpenRouter (already has its own internal 2-model retry)
     result = call_openrouter_engine(prompt_text, system_prompt=system_prompt, temperature=temperature)
@@ -253,40 +254,11 @@ def call_ai_with_fallback(prompt_text, system_prompt=None, temperature=None):
         st.session_state["ai_connected"] = True
         st.session_state["ai_provider_used"] = "OpenRouter"
     return result
-    
-def summarize_single_document(document_text, file_name):
-    """Summarizes one uploaded document into a concise institutional
-    financial summary (500-1000 words). Uses the existing three-provider
-    fallback chain (Google AI Studio -> Groq -> OpenRouter)."""
-    if not document_text or not document_text.strip():
-        return f"⚠️ No extractable text found in '{file_name}'. Nothing to summarize."
 
-    system_prompt = (
-        "You are an elite institutional financial analyst. Produce concise, "
-        "precise, and professional document summaries suitable for a "
-        "buy-side investment research desk. Focus on material facts: key "
-        "figures, dates, events, risks, and strategic implications. Avoid "
-        "filler language and avoid restating the obvious."
-    )
-
-    summarization_prompt = f"""Summarize the following document into a single, coherent institutional financial summary.
-
-Requirements:
-- Length: 500 to 1000 words.
-- Tone: professional, analytical, institutional-grade (as if written for a portfolio manager).
-- Cover: key facts, financial figures, dates/events, risks, and any strategic or market implications present in the source text.
-- Do not include any content that is not supported by the source document.
-- Do not use markdown headers or bullet lists; write in clear prose paragraphs.
-
-Source Document Name: {file_name}
-
-Source Document Text:
-{document_text}
-
-Return only the summary text, with no preamble or meta-commentary."""
-
-    result = call_ai_with_fallback(summarization_prompt, system_prompt=system_prompt, temperature=0.3)
-    return result
+    # --- TO REVERT once debugging is done ---
+    # Replace both `except Exception as e:` blocks back to:
+    #     except Exception:
+    #         pass
     
 def merge_document_summaries(document_summaries):
     """Merges per-document summaries (from summarize_single_document) into
